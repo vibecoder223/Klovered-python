@@ -9,11 +9,30 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: klovered
+          POSTGRES_PASSWORD: klovered_pw
+          POSTGRES_DB: klovered
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U klovered -d klovered"
+          --health-interval 5s --health-timeout 5s --health-retries 15
+
+    env:
+      ADMIN_DATABASE_URL: postgresql://klovered:klovered_pw@localhost:5432/klovered
+      DATABASE_URL: postgresql://app_user:app_pw@localhost:5432/klovered
+      AUTH_JWT_SECRET: test-secret
+      STORAGE_DIR: /tmp/klovered-uploads
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
@@ -21,8 +40,11 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
 
-      - name: Lint (ruff)
+      - name: Apply schema (creates app_user, RLS)
+        run: python scripts/apply_schema.py
+
+      - name: Lint
         run: ruff check .
 
-      - name: Test (pytest)
+      - name: Test (unit + integration)
         run: pytest -v

@@ -1,0 +1,24 @@
+# Production stack for the Droplet, using DO Managed Postgres (no bundled db).
+# The Droplet is inside the DO VPC, so it can reach the private DB endpoint.
+#
+# Setup on the Droplet (once):
+#   git clone <repo> ~/Klovered-python && cd ~/Klovered-python
+#   cp .env.example .env   # fill DATABASE_URL / ADMIN_DATABASE_URL / AUTH_JWT_SECRET / MISTRAL_API_KEY
+#   docker compose -f docker-compose.prod.yml build
+#   docker compose -f docker-compose.prod.yml run --rm api python scripts/apply_schema.py
+#   docker compose -f docker-compose.prod.yml up -d
+
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      STORAGE_DIR: /data/uploads
+    volumes:
+      - uploads:/data/uploads
+    ports:
+      - "8000:8000"
+
+volumes:
+  uploads:

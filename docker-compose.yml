@@ -1,0 +1,43 @@
+# Klovered — single-Droplet stack. `docker compose up -d` runs the whole thing.
+# db (Postgres+pgvector) + api (FastAPI). Add the `web` (Next.js) and `caddy`
+# services when the frontend is containerized.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: klovered
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-klovered_pw}
+      POSTGRES_DB: klovered
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+      # Runs once on first init to create tables, roles, RLS.
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U klovered -d klovered"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://app_user:app_pw@db:5432/klovered
+      ADMIN_DATABASE_URL: postgresql://klovered:${POSTGRES_PASSWORD:-klovered_pw}@db:5432/klovered
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev-secret-change-me}
+      STORAGE_DIR: /data/uploads
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+volumes:
+  dbdata:
+  uploads:

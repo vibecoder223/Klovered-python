@@ -1,40 +1,66 @@
 # Klovered — Python pipeline backend (FastAPI)
 
-Python/FastAPI backend for the Klovered Free tool's document / RAG / export
-pipeline. Reads and writes the **same Supabase project** as the Next.js app
-(`klovered-free`); the frontend stays Next.js and proxies `/api/pipeline/*` here.
+Self-hosted FastAPI backend for the Klovered Free tool. **No Supabase, no
+Vercel** — runs on a DigitalOcean Droplet against DO Managed PostgreSQL, with
+Mistral as the only AI vendor (generation + embeddings + OCR).
 
-Two Supabase access paths (isolation-safe):
+## Isolation model
 
-- **User path** — PostgREST called with the guest's forwarded JWT + the anon
-  key, so Postgres RLS enforces tenant isolation.
-- **Service path** — service-role key, RLS bypassed, for trusted worker/storage
-  code only.
+Two Postgres roles, mirroring the trust split:
 
-## Endpoints (current)
+- **Request path** — the api connects as `app_user` (NOBYPASSRLS) and runs
+  `SET LOCAL app.user_id = <verified uuid>` per transaction. Postgres RLS scopes
+  every row to the caller's org; a missing check can't leak another tenant.
+- **Admin/worker path** — connects as the DB superuser (owns the tables, so RLS
+  doesn't apply) for guest provisioning and background work.
+
+Guest auth is self-issued HS256 (`app/auth.py`) — no external auth service.
+
+## Endpoints
 
 | Method | Path | Notes |
 |--------|------|-------|
 | GET  | `/health` | liveness |
-| GET  | `/api/pipeline/whoami` | verifies guest JWT, resolves org via RLS |
+| POST | `/api/auth/guest` | mint token + provision org/deal (replaces Supabase anon + /api/session) |
+| GET  | `/api/pipeline/whoami` | verify token, resolve org via RLS |
 | POST | `/api/pipeline/parse` | stateless parse + timing (speed probe) |
-| POST | `/api/pipeline/documents/upload` | port of the TS upload route |
+| POST | `/api/pipeline/documents/upload` | one-RFP-per-session cap, local-disk storage |
 
-## Local dev
+Every response carries `X-Process-Time-Ms`.
+
+## Local dev (bundled Postgres via Docker)
 
 ```bash
-python -m venv .venv
-. .venv/Scripts/activate         # macOS/Linux: . .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env.local       # or point at klovered-free/.env.local values
-pytest -v
-uvicorn app.main:app --reload --port 8000
+docker compose up -d              # api + pgvector Postgres (schema auto-applied)
+curl -X POST localhost:8000/api/auth/guest
 ```
 
-Every response carries an `X-Process-Time-Ms` header for latency measurement.
+Run the test suite against the bundled DB:
+
+```bash
+export DATABASE_URL=postgresql://app_user:app_pw@localhost:5432/klovered
+export ADMIN_DATABASE_URL=postgresql://klovered:klovered_pw@localhost:5432/klovered
+pip install -e ".[dev]" && pytest -v
+```
+
+Without a database, `pytest` runs only the unit tests (parse + auth); integration
+tests skip automatically.
+
+## Production (Droplet + DO Managed Postgres)
+
+The Droplet sits in the DO VPC and reaches the **private** DB endpoint. See
+`docker-compose.prod.yml` header for the one-time setup; deploys are automated by
+`.github/workflows/deploy.yml` (SSH → pull → build → apply schema → up).
+
+## CI/CD
+
+- **CI** (`ci.yml`) — ruff + full pytest against an ephemeral pgvector service on
+  every push/PR. The integration + cross-tenant isolation tests run here.
+- **Deploy** (`deploy.yml`) — after CI passes on `main`, SSH to the Droplet and
+  redeploy. Secrets: `DROPLET_HOST`, `DROPLET_USER`, `DROPLET_SSH_KEY`.
 
 ## Migration status
 
-Port of the TS `lib/*` pipeline is staged (strangler): **parse + upload** landed;
-chunk / embeddings / extract / agents / rag / retrieval / jobs / docx-export are
-next. See `docs/` in the Propello repo for the full design + phase plan.
+Supabase-free foundation complete: self-issued auth, psycopg data layer with
+GUC-based RLS, local-disk storage, parse + upload. Next: port the RAG pipeline
+(chunk / embed / extract / rag / retrieval / jobs / docx-export) onto psycopg.

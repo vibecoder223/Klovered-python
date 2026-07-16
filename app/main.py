@@ -4,10 +4,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .auth import AuthError
-from .routers import parse as parse_router
-from .routers import probe
+from .routers import auth as auth_router
+from .routers import documents
 
-app = FastAPI(title="Klovered — pipeline API (Python)")
+app = FastAPI(title="Klovered — pipeline API (Python, self-hosted)")
 
 
 @app.middleware("http")
@@ -28,5 +28,5 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
-app.include_router(probe.router)
-app.include_router(parse_router.router)
+app.include_router(auth_router.router)
+app.include_router(documents.router)

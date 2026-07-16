@@ -1,0 +1,19 @@
+# Caddy reverse proxy for production on the Droplet. Set DOMAIN in the env and
+# add a `caddy` service to docker-compose that mounts this file — Caddy then
+# auto-issues and renews TLS for {$DOMAIN}. Until you have a domain, hit the api
+# directly on :8000.
+#
+# Routes mirror the App Platform ingress plan: /api/* → api, everything else →
+# web (once the Next.js frontend is containerized alongside).
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+}

@@ -1,46 +1,26 @@
-import time
+import os
 
-import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi.testclient import TestClient
+
+HAS_DB = bool(os.getenv("DATABASE_URL") and os.getenv("ADMIN_DATABASE_URL"))
+requires_db = pytest.mark.skipif(not HAS_DB, reason="no database configured")
 
 
 @pytest.fixture(scope="session")
-def rsa_key():
-    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+def client():
+    from app.main import app
 
-
-@pytest.fixture(scope="session")
-def public_key(rsa_key):
-    return rsa_key.public_key()
+    return TestClient(app, raise_server_exceptions=False)
 
 
 @pytest.fixture
-def make_token(rsa_key):
-    def _make(sub="user-1", aud="authenticated", expired=False, **extra):
-        now = int(time.time())
-        payload = {
-            "sub": sub,
-            "aud": aud,
-            "exp": now - 60 if expired else now + 3600,
-            "iat": now,
-            **extra,
-        }
-        return jwt.encode(payload, rsa_key, algorithm="RS256")
+def guest(client):
+    """Provision a fresh guest and return its token + ids."""
+
+    def _make():
+        r = client.post("/api/auth/guest")
+        assert r.status_code == 200, r.text
+        return r.json()
 
     return _make
-
-
-@pytest.fixture(autouse=True)
-def patch_jwks(monkeypatch, public_key):
-    # Replace the network JWKS client with one that returns our test public key.
-    class _FakeSigningKey:
-        key = public_key
-
-    class _FakeJwkClient:
-        def get_signing_key_from_jwt(self, token):
-            return _FakeSigningKey()
-
-    from app import auth
-
-    monkeypatch.setattr(auth, "_jwk_client", lambda: _FakeJwkClient())

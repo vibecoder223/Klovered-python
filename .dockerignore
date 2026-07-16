@@ -3,11 +3,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+.git/
+.github/
+data/
+tests/
 .env
 .env.local
 *.egg-info/
-dist/
-build/
-.coverage
-htmlcov/
-data/

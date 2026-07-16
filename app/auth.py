@@ -1,7 +1,13 @@
-from functools import lru_cache
+"""Self-issued guest auth (replaces Supabase Auth).
+
+Only this service mints and verifies tokens, so a single HS256 secret is enough
+— no JWKS round-trip. A guest is a random uuid; the token carries it as `sub`.
+"""
+
+import time
+import uuid
 
 import jwt
-from jwt import PyJWKClient
 
 from .config import get_settings
 
@@ -13,21 +19,29 @@ class AuthError(Exception):
         super().__init__(message)
 
 
-@lru_cache
-def _jwk_client() -> PyJWKClient:
-    # Cached JWKS fetch + in-process key cache, like the TS getClaims() path.
-    return PyJWKClient(get_settings().jwks_url)
+def new_user_id() -> str:
+    return str(uuid.uuid4())
 
 
-def verify_jwt(token: str) -> dict:
-    settings = get_settings()
+def mint_guest_token(user_id: str) -> str:
+    s = get_settings()
+    now = int(time.time())
+    payload = {
+        "sub": user_id,
+        "is_anonymous": True,
+        "iat": now,
+        "exp": now + s.auth_token_ttl_seconds,
+    }
+    return jwt.encode(payload, s.auth_jwt_secret, algorithm="HS256")
+
+
+def verify_token(token: str) -> dict:
+    s = get_settings()
     try:
-        signing_key = _jwk_client().get_signing_key_from_jwt(token)
         claims = jwt.decode(
             token,
-            signing_key.key,
-            algorithms=["RS256", "ES256"],
-            audience=settings.supabase_jwt_aud,
+            s.auth_jwt_secret,
+            algorithms=["HS256"],
             options={"require": ["sub", "exp"]},
         )
     except jwt.ExpiredSignatureError:

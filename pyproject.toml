@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "klovered-python-backend"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic-settings>=2.4",
+    "pyjwt[crypto]>=2.9",
+    "httpx>=0.27",
+    "python-multipart>=0.0.9",
+    "pymupdf>=1.24",
+    "mammoth>=1.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "respx>=0.21", "ruff>=0.6"]
+
+# Explicit package list so editable install doesn't try to discover `tests`
+# as a package (flat layout auto-discovery would error on multiple top dirs).
+[tool.setuptools]
+packages = ["app", "app.routers", "app.pipeline"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

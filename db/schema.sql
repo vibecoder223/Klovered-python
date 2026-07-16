@@ -63,8 +63,176 @@ create table if not exists documents (
   file_size         bigint not null default 0,
   mime_type         text,
   processing_status text not null default 'uploaded',
-  created_at        timestamptz not null default now()
+  extracted_text    text,
+  error_message     text,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
 );
+
+create table if not exists document_chunks (
+  id                    uuid primary key default gen_random_uuid(),
+  document_id           uuid references documents(id) on delete cascade,
+  org_id                uuid not null references organizations(id) on delete cascade,
+  chunk_index           int not null default 0,
+  section_title         text,
+  section_path          text,
+  page_start            int,
+  page_end              int,
+  raw_text              text,
+  cleaned_text          text,
+  text_for_embedding    text,
+  embedding             vector(1024),
+  sparse_terms          text[],
+  created_at            timestamptz not null default now()
+);
+create index if not exists idx_chunks_embedding on document_chunks
+  using hnsw (embedding vector_cosine_ops);
+create index if not exists idx_chunks_sparse_terms on document_chunks using gin (sparse_terms);
+
+create table if not exists extracted_requirements (
+  id              uuid primary key default gen_random_uuid(),
+  document_id     uuid not null references documents(id) on delete cascade,
+  requirement_id  text not null,
+  title           text,
+  description     text,
+  category        text,
+  priority        text,
+  is_mandatory    boolean default false,
+  section         text,
+  source_page     int,
+  classification  text not null default 'must',
+  topic           text not null default 'technical',
+  created_at      timestamptz not null default now()
+);
+
+create table if not exists compliance_matrix (
+  id                 uuid primary key default gen_random_uuid(),
+  document_id        uuid not null references documents(id) on delete cascade,
+  requirement_id     text not null,
+  our_capability     text,
+  compliance_status  text not null default 'pending'
+);
+
+create table if not exists questions (
+  id              uuid primary key default gen_random_uuid(),
+  document_id     uuid not null references documents(id) on delete cascade,
+  requirement_id  text,
+  question_text   text not null,
+  category        text,
+  priority        text not null default 'medium',
+  status          text not null default 'todo',
+  created_at      timestamptz not null default now()
+);
+
+create table if not exists responses (
+  id                          uuid primary key default gen_random_uuid(),
+  question_id                 uuid not null unique references questions(id) on delete cascade,
+  ai_generated_draft          text,
+  draft_text                  text,
+  final_text                  text,
+  answer_text_with_markers    text,
+  tone                        text default 'technical',
+  confidence                  numeric,
+  gap_flag                    text,
+  status                      text not null default 'requires_review',
+  generated_by                text default 'ai',
+  created_at                  timestamptz not null default now(),
+  updated_at                  timestamptz not null default now()
+);
+
+create table if not exists citations (
+  id                  uuid primary key default gen_random_uuid(),
+  response_id         uuid not null references responses(id) on delete cascade,
+  chunk_id            uuid,
+  document_filename   text,
+  section_path        text,
+  page                int,
+  quote               text
+);
+
+create table if not exists agent_runs (
+  id             uuid primary key default gen_random_uuid(),
+  document_id    uuid not null references documents(id) on delete cascade,
+  agent_type     text not null,
+  status         text not null,
+  input_tokens   int,
+  output_tokens  int,
+  cost           numeric,
+  error_message  text,
+  result         jsonb,
+  started_at     timestamptz,
+  completed_at   timestamptz
+);
+
+create table if not exists jobs (
+  id             uuid primary key default gen_random_uuid(),
+  document_id    uuid not null references documents(id) on delete cascade,
+  org_id         uuid not null references organizations(id) on delete cascade,
+  stage          text not null,
+  target_id      uuid,
+  status         text not null default 'pending',
+  attempts       int not null default 0,
+  max_attempts   int not null default 3,
+  error          text,
+  run_after      timestamptz not null default now(),
+  lease_until    timestamptz,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
+);
+-- One live (non-done/dead) job per (document, stage, target) — enqueue is a
+-- no-op insert-ignore against this when a job is already pending/claimed.
+create unique index if not exists idx_jobs_live_unique on jobs (document_id, stage, coalesce(target_id, '00000000-0000-0000-0000-000000000000'))
+  where status in ('pending', 'claimed');
+
+-- claim_jobs: atomically lease up to p_limit pending, due jobs.
+create or replace function claim_jobs(p_limit int) returns setof jobs
+  language plpgsql security definer set search_path = public as
+$$
+begin
+  return query
+  update jobs set status = 'claimed', attempts = attempts + 1,
+         lease_until = now() + interval '5 minutes', updated_at = now()
+  where id in (
+    select id from jobs
+    where status = 'pending' and run_after <= now()
+    order by created_at
+    limit p_limit
+    for update skip locked
+  )
+  returning *;
+end;
+$$;
+
+-- recover_stuck_jobs: a claimed job whose lease expired goes back to pending.
+create or replace function recover_stuck_jobs() returns void
+  language sql security definer set search_path = public as
+$$
+  update jobs set status = 'pending', lease_until = null, updated_at = now()
+  where status = 'claimed' and lease_until < now()
+$$;
+
+-- match_chunks: cosine-similarity search scoped to an org (RLS is bypassed by
+-- SECURITY DEFINER, so the org filter here IS the isolation boundary for this
+-- function — every caller must pass p_org_id and it must be their own).
+create or replace function match_chunks(p_org_id uuid, p_embedding vector(1024), p_match_count int default 20)
+returns table (
+  chunk_id uuid, text text, section_path text, page_start int, page_end int,
+  document_filename text, similarity float
+)
+language sql stable security definer set search_path = public as
+$$
+  select
+    c.id as chunk_id,
+    coalesce(c.cleaned_text, c.raw_text, '') as text,
+    c.section_path, c.page_start, c.page_end,
+    coalesce(d.filename, '(unknown)') as document_filename,
+    1 - (c.embedding <=> p_embedding) as similarity
+  from document_chunks c
+  left join documents d on d.id = c.document_id
+  where c.org_id = p_org_id and c.embedding is not null
+  order by c.embedding <=> p_embedding
+  limit p_match_count
+$$;
 
 -- ---------- helpers ----------
 -- The verified caller, read from the per-transaction GUC set by the app.
@@ -84,6 +252,14 @@ alter table team_members  enable row level security;
 alter table org_settings  enable row level security;
 alter table deals         enable row level security;
 alter table documents     enable row level security;
+alter table document_chunks         enable row level security;
+alter table extracted_requirements  enable row level security;
+alter table compliance_matrix       enable row level security;
+alter table questions               enable row level security;
+alter table responses               enable row level security;
+alter table citations                enable row level security;
+alter table agent_runs              enable row level security;
+alter table jobs                    enable row level security;
 
 drop policy if exists org_member on organizations;
 create policy org_member on organizations for select
@@ -106,6 +282,44 @@ drop policy if exists documents_rw on documents;
 create policy documents_rw on documents for all
   using (deal_id in (select id from deals where org_id in (select current_user_org_ids())))
   with check (deal_id in (select id from deals where org_id in (select current_user_org_ids())));
+
+drop policy if exists chunks_rw on document_chunks;
+create policy chunks_rw on document_chunks for all
+  using (org_id in (select current_user_org_ids()))
+  with check (org_id in (select current_user_org_ids()));
+
+drop policy if exists reqs_rw on extracted_requirements;
+create policy reqs_rw on extracted_requirements for all
+  using (document_id in (select id from documents where deal_id in (select id from deals where org_id in (select current_user_org_ids()))))
+  with check (document_id in (select id from documents where deal_id in (select id from deals where org_id in (select current_user_org_ids()))));
+
+drop policy if exists cm_rw on compliance_matrix;
+create policy cm_rw on compliance_matrix for all
+  using (document_id in (select id from documents where deal_id in (select id from deals where org_id in (select current_user_org_ids()))))
+  with check (document_id in (select id from documents where deal_id in (select id from deals where org_id in (select current_user_org_ids()))));
+
+drop policy if exists questions_rw on questions;
+create policy questions_rw on questions for all
+  using (document_id in (select id from documents where deal_id in (select id from deals where org_id in (select current_user_org_ids()))))
+  with check (document_id in (select id from documents where deal_id in (select id from deals where org_id in (select current_user_org_ids()))));
+
+drop policy if exists responses_rw on responses;
+create policy responses_rw on responses for all
+  using (question_id in (select id from questions where document_id in (select id from documents where deal_id in (select id from deals where org_id in (select current_user_org_ids())))))
+  with check (question_id in (select id from questions where document_id in (select id from documents where deal_id in (select id from deals where org_id in (select current_user_org_ids())))));
+
+drop policy if exists citations_rw on citations;
+create policy citations_rw on citations for all
+  using (response_id in (select id from responses where question_id in (select id from questions where document_id in (select id from documents where deal_id in (select id from deals where org_id in (select current_user_org_ids()))))))
+  with check (response_id in (select id from responses where question_id in (select id from questions where document_id in (select id from documents where deal_id in (select id from deals where org_id in (select current_user_org_ids()))))));
+
+drop policy if exists agent_runs_ro on agent_runs;
+create policy agent_runs_ro on agent_runs for select
+  using (document_id in (select id from documents where deal_id in (select id from deals where org_id in (select current_user_org_ids()))));
+
+drop policy if exists jobs_ro on jobs;
+create policy jobs_ro on jobs for select
+  using (org_id in (select current_user_org_ids()));
 
 -- ---------- grants ----------
 grant usage on schema public to app_user;

@@ -6,6 +6,7 @@ change — callers never see the filesystem.
 """
 
 import os
+import shutil
 from pathlib import Path
 
 from .config import get_settings
@@ -40,3 +41,14 @@ def delete(rel_path: str) -> None:
     dest = _resolve(rel_path)
     if dest.exists():
         dest.unlink()
+
+
+def delete_dir(rel_path: str) -> int:
+    """Remove an entire directory (e.g. a deal's upload folder). Returns the
+    number of files removed."""
+    dest = _resolve(rel_path)
+    if not dest.exists():
+        return 0
+    count = sum(1 for p in dest.rglob("*") if p.is_file())
+    shutil.rmtree(dest, ignore_errors=True)
+    return count

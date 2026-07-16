@@ -5,7 +5,8 @@ from fastapi.responses import JSONResponse
 
 from .auth import AuthError
 from .routers import auth as auth_router
-from .routers import documents
+from .routers import cron, documents
+from .routers import jobs as jobs_router
 
 app = FastAPI(title="Klovered — pipeline API (Python, self-hosted)")
 
@@ -30,3 +31,5 @@ async def health() -> dict:
 
 app.include_router(auth_router.router)
 app.include_router(documents.router)
+app.include_router(jobs_router.router)
+app.include_router(cron.router)

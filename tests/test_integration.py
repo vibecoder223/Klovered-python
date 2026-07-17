@@ -112,21 +112,50 @@ def test_login_sets_cookie(client):
     assert client.cookies.get("klovered_session")
 
 
-def test_signup_does_not_carry_over_guest_work(client, guest):
-    """The dropped Journey C: signing up must NOT upgrade a concurrent guest
-    session — a signed-up account always starts with its OWN fresh org, never
-    the guest's. Only signed-in accounts persist data, by design."""
+def test_signup_upgrades_guest_in_place(client, guest):
+    """Journey C (restored): signing up while an anonymous guest session is
+    present UPGRADES that guest in place — same user id, same org, so any work
+    the guest already did carries into the account instead of being discarded."""
     g = guest()
     email = _unique_email()
 
     r = client.post(
         "/api/auth/signup",
         json={"email": email, "password": "correcthorse123"},
-        headers=_auth(g["access_token"]),  # a guest token present, but must be ignored
+        headers=_auth(g["access_token"]),  # guest token present -> upgrade it
     )
     assert r.status_code == 200, r.text
-    assert r.json()["org_id"] != g["org_id"]
-    assert r.json()["user_id"] != g["user_id"]
+    body = r.json()
+    assert body["is_anonymous"] is False
+    assert body["email"] == email
+    assert body["user_id"] == g["user_id"]  # same identity, kept
+    assert body["org_id"] == g["org_id"]    # same workspace + data, kept
+
+
+def test_signup_without_guest_creates_fresh_account(client):
+    """No guest session -> a brand-new account + workspace."""
+    email = _unique_email()
+    r = client.post("/api/auth/signup", json={"email": email, "password": "correcthorse123"})
+    assert r.status_code == 200, r.text
+    assert r.json()["is_anonymous"] is False
+    assert r.json()["org_id"]
+
+
+def test_signup_duplicate_email_conflicts(client, guest):
+    """An email already registered -> 409, even when a guest is upgrading (the
+    UNIQUE(lower(email)) index rejects the UPDATE)."""
+    email = _unique_email()
+    client.post("/api/auth/signup", json={"email": email, "password": "correcthorse123"})
+    client.cookies.clear()
+
+    g = guest()
+    r = client.post(
+        "/api/auth/signup",
+        json={"email": email, "password": "correcthorse123"},
+        headers=_auth(g["access_token"]),
+    )
+    assert r.status_code == 409
+    assert "already exists" in r.json()["error"]
 
 
 def test_logout_clears_the_cookie(client):

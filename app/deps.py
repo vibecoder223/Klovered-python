@@ -50,3 +50,16 @@ async def require_guest(
         org_id=str(row["org_id"]),
         is_anonymous=bool(claims.get("is_anonymous", False)),
     )
+
+
+async def optional_guest(
+    authorization: str = Header(default=""),
+    session_cookie: str | None = Cookie(default=None, alias=get_settings().session_cookie_name),
+) -> GuestContext | None:
+    """Like require_guest, but returns None instead of raising when there is no
+    valid session. For handlers (signup, Google callback) that upgrade a guest
+    when one exists but must still work for a first-time visitor with no cookie."""
+    try:
+        return await require_guest(authorization, session_cookie)
+    except AuthError:
+        return None

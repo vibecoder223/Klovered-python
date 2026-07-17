@@ -35,7 +35,7 @@ from ..auth import (
 )
 from ..config import get_settings
 from ..cookies import clear_session_cookie, set_session_cookie
-from ..deps import GuestContext, require_guest
+from ..deps import GuestContext, optional_guest, require_guest
 from ..provisioning import first_workspace as _first_workspace
 from ..provisioning import provision_workspace as _provision_workspace
 
@@ -67,30 +67,56 @@ async def create_guest(response: Response) -> dict:
     }
 
 
+def _fresh_account(cur, email: str, password_hash: str) -> tuple:
+    """Insert a brand-new account + workspace. Shared by the no-guest path and
+    the purged-guest fallback so the two can't drift."""
+    user_id = new_user_id()
+    cur.execute(
+        "INSERT INTO users (id, email, password_hash, is_anonymous) VALUES (%s, %s, %s, false)",
+        (user_id, email, password_hash),
+    )
+    org_id, deal_id = _provision_workspace(cur, user_id, "Workspace", f"org-{user_id}", "First proposal")
+    return user_id, org_id, deal_id
+
+
 @router.post("/signup")
-async def signup(body: Credentials, response: Response) -> dict:
-    """Always creates a fresh account + workspace. A guest's session (if any)
-    is simply replaced by this new one — their throwaway data is not carried
-    over and is left to the 48h purge, by design (only accounts persist)."""
+async def signup(
+    body: Credentials,
+    response: Response,
+    guest: GuestContext | None = Depends(optional_guest),
+) -> dict:
+    """Create a real account. If the caller is currently an anonymous guest, we
+    UPGRADE that guest in place — same user id, same org, same uploaded work —
+    so nothing they did as a guest is lost. With no guest session, a fresh
+    account + workspace is created."""
     email = validate_email(body.email)
     password = validate_password(body.password)
     password_hash = hash_password(password)
 
     try:
         with db.admin_tx() as cur:
-            user_id = new_user_id()
-            cur.execute(
-                "INSERT INTO users (id, email, password_hash, is_anonymous) "
-                "VALUES (%s, %s, %s, false)",
-                (user_id, email, password_hash),
-            )
-            org_id, deal_id = _provision_workspace(
-                cur, user_id, "Workspace", f"org-{user_id}", "First proposal"
-            )
+            if guest and guest.is_anonymous:
+                cur.execute(
+                    "UPDATE users SET email = %s, password_hash = %s, is_anonymous = false "
+                    "WHERE id = %s AND is_anonymous = true RETURNING id",
+                    (email, password_hash, guest.user_id),
+                )
+                row = cur.fetchone()
+                if row:  # guest still exists -> upgraded in place, keep their org + data
+                    user_id = row["id"]
+                    org_id, deal_id = _first_workspace(cur, user_id)
+                    if org_id is None:
+                        org_id, deal_id = _provision_workspace(
+                            cur, user_id, "Workspace", f"org-{user_id}", "First proposal"
+                        )
+                else:  # guest row was purged mid-flight -> fall through to fresh
+                    user_id, org_id, deal_id = _fresh_account(cur, email, password_hash)
+            else:
+                user_id, org_id, deal_id = _fresh_account(cur, email, password_hash)
     except UniqueViolation:
         raise AuthError(409, "An account with that email already exists. Sign in instead.")
 
-    token = mint_account_token(user_id)
+    token = mint_account_token(str(user_id))
     set_session_cookie(response, token, get_settings().auth_account_token_ttl_seconds)
     return {
         "access_token": token,

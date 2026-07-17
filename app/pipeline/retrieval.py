@@ -214,12 +214,20 @@ def _extract_keywords(q: str) -> list[str]:
 
 
 def _fetch_sparse_candidates(org_id: str, terms: list[str]) -> list[dict]:
+    # knowledge_document_id IS NOT NULL is load-bearing: answers must be
+    # grounded in the org's knowledge base (past proposals, policies), never in
+    # the RFP being answered — whose chunks live in this same table with
+    # document_id set instead. match_chunks (the dense half) applies the same
+    # filter; both halves must draw from the same pool or the merge is
+    # comparing candidates from different corpora.
     with db.admin_tx() as cur:
         cur.execute(
             "SELECT c.id, c.raw_text, c.cleaned_text, c.section_path, c.page_start, c.page_end, "
-            "c.sparse_terms, coalesce(d.filename, '(unknown)') AS document_filename "
-            "FROM document_chunks c LEFT JOIN documents d ON d.id = c.document_id "
-            "WHERE c.org_id = %s AND c.sparse_terms && %s LIMIT %s",
+            "c.sparse_terms, coalesce(k.filename, '(unknown)') AS document_filename "
+            "FROM document_chunks c "
+            "JOIN knowledge_documents k ON k.id = c.knowledge_document_id "
+            "WHERE c.org_id = %s AND c.knowledge_document_id IS NOT NULL "
+            "AND c.sparse_terms && %s LIMIT %s",
             (org_id, terms, _SPARSE_CANDIDATE_LIMIT),
         )
         return cur.fetchall()

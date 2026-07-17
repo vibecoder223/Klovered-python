@@ -77,9 +77,35 @@ create table if not exists documents (
   updated_at        timestamptz not null default now()
 );
 
+-- The knowledge base: past proposals, security docs and policies the org
+-- uploads. Retrieval draws answers from THESE — `documents` above is the RFP
+-- being answered, which is a different thing entirely.
+create table if not exists knowledge_documents (
+  id                uuid primary key default gen_random_uuid(),
+  org_id            uuid not null references organizations(id) on delete cascade,
+  filename          text not null,
+  file_path         text not null,
+  file_size         bigint not null default 0,
+  mime_type         text,
+  doc_type          text not null default 'other',
+  ingestion_status  text not null default 'pending',
+  error_message     text,
+  page_count        int,
+  text_hash         text,
+  uploaded_by       uuid references users(id),
+  created_at        timestamptz not null default now()
+);
+-- Dedup guard: the same text ingested twice in one org is skipped rather than
+-- re-chunked (see pipeline/ingest.py).
+create unique index if not exists idx_kdocs_org_texthash
+  on knowledge_documents (org_id, text_hash) where text_hash is not null;
+
 create table if not exists document_chunks (
   id                    uuid primary key default gen_random_uuid(),
   document_id           uuid references documents(id) on delete cascade,
+  -- Set for knowledge-base chunks; null for the RFP's own chunks. Retrieval
+  -- searches ONLY rows where this is set.
+  knowledge_document_id uuid references knowledge_documents(id) on delete cascade,
   org_id                uuid not null references organizations(id) on delete cascade,
   chunk_index           int not null default 0,
   section_title         text,
@@ -228,16 +254,22 @@ returns table (
   document_filename text, similarity float
 )
 language sql stable security definer set search_path = public as
+-- Only knowledge-base chunks are searched (knowledge_document_id is not null):
+-- answers are grounded in the org's own past documents, never in the RFP being
+-- answered. Mirrors the sparse/BM25 filter in pipeline/retrieval.py — the two
+-- halves of hybrid retrieval must draw from the same pool.
 $$
   select
     c.id as chunk_id,
     coalesce(c.cleaned_text, c.raw_text, '') as text,
     c.section_path, c.page_start, c.page_end,
-    coalesce(d.filename, '(unknown)') as document_filename,
+    coalesce(k.filename, '(unknown)') as document_filename,
     1 - (c.embedding <=> p_embedding) as similarity
   from document_chunks c
-  left join documents d on d.id = c.document_id
-  where c.org_id = p_org_id and c.embedding is not null
+  join knowledge_documents k on k.id = c.knowledge_document_id
+  where c.org_id = p_org_id
+    and c.knowledge_document_id is not null
+    and c.embedding is not null
   order by c.embedding <=> p_embedding
   limit p_match_count
 $$;
@@ -261,6 +293,7 @@ alter table team_members  enable row level security;
 alter table org_settings  enable row level security;
 alter table deals         enable row level security;
 alter table documents     enable row level security;
+alter table knowledge_documents     enable row level security;
 alter table document_chunks         enable row level security;
 alter table extracted_requirements  enable row level security;
 alter table compliance_matrix       enable row level security;
@@ -300,6 +333,11 @@ drop policy if exists documents_rw on documents;
 create policy documents_rw on documents for all
   using (deal_id in (select id from deals where org_id in (select current_user_org_ids())))
   with check (deal_id in (select id from deals where org_id in (select current_user_org_ids())));
+
+drop policy if exists kdocs_rw on knowledge_documents;
+create policy kdocs_rw on knowledge_documents for all
+  using (org_id in (select current_user_org_ids()))
+  with check (org_id in (select current_user_org_ids()));
 
 drop policy if exists chunks_rw on document_chunks;
 create policy chunks_rw on document_chunks for all

@@ -1,6 +1,9 @@
 """Unit tests for retrieval's pure logic (BM25 scoring, merge/rank,
 keyword extraction) — no database, always run."""
 
+import inspect
+
+from app.pipeline import retrieval
 from app.pipeline.retrieval import (
     Candidate,
     _extract_keywords,
@@ -9,6 +12,21 @@ from app.pipeline.retrieval import (
     _terms_from_keywords,
     is_no_source,
 )
+
+
+def test_sparse_search_queries_only_knowledge_base_chunks():
+    """Regression guard. Retrieval must ground answers in the org's knowledge
+    base (chunks with knowledge_document_id set) — NOT in the RFP being
+    answered, whose chunks share document_chunks with document_id set instead.
+
+    An earlier port dropped this filter and joined `documents`, which would
+    have answered every RFP question using the RFP's own text as the source.
+    """
+    sql = inspect.getsource(retrieval._fetch_sparse_candidates)
+    assert "knowledge_document_id IS NOT NULL" in sql
+    assert "JOIN knowledge_documents" in sql
+    # Must not fall back to the RFP's own documents table for the filename.
+    assert "JOIN documents" not in sql
 
 
 def _row(id_, terms, **extra):

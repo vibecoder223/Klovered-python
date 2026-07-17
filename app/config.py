@@ -43,9 +43,24 @@ class Settings(BaseSettings):
 
     cron_secret: str = ""
 
+    # Google OAuth (replaces Supabase's linkIdentity Google leg). The client id
+    # is public; the secret must live only in .env, never in the repo. Google
+    # rejects raw-IP redirect URIs — google_redirect_uri must be localhost (for
+    # dev) or a real domain, and must be registered on the OAuth client.
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_redirect_uri: str = "http://localhost:8000/api/auth/google/callback"
+    # Where the browser lands after a successful Google login; the minted token
+    # is appended as a #access_token fragment for the SPA to read.
+    google_post_login_redirect: str = "http://localhost:3100/"
+
     @property
     def llm_key(self) -> str:
         return self.llm_api_key or self.mistral_api_key
+
+    @property
+    def google_enabled(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret)
 
 
 @lru_cache

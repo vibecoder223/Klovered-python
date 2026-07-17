@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 
-from fastapi import Header
+from fastapi import Cookie, Header
 
 from . import db
 from .auth import AuthError, verify_token
+from .config import get_settings
 
 
 @dataclass
@@ -14,10 +15,22 @@ class GuestContext:
     is_anonymous: bool
 
 
-async def require_guest(authorization: str = Header(default="")) -> GuestContext:
-    if not authorization.lower().startswith("bearer "):
-        raise AuthError(401, "No session")
-    token = authorization[7:].strip()
+def _extract_token(authorization: str, session_cookie: str | None) -> str:
+    """Authorization header wins (API clients, curl, tests); the session
+    cookie is the fallback (browser requests from marketing/the tool, which
+    never set the header — they rely on the cookie set at login/signup)."""
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    if session_cookie:
+        return session_cookie
+    raise AuthError(401, "No session")
+
+
+async def require_guest(
+    authorization: str = Header(default=""),
+    session_cookie: str | None = Cookie(default=None, alias=get_settings().session_cookie_name),
+) -> GuestContext:
+    token = _extract_token(authorization, session_cookie)
     claims = verify_token(token)
     user_id = claims["sub"]
 

@@ -4,12 +4,18 @@ Flow (Authorization Code):
   GET  /api/auth/google/start     -> redirect the browser to Google's consent
   GET  /api/auth/google/callback  -> Google returns here with ?code&state;
                                      we exchange the code, verify the ID token,
-                                     find/create/upgrade the user, mint a token,
-                                     and hand it to the SPA via a URL fragment.
+                                     find/create the user, mint a token, set
+                                     the session cookie, and redirect into
+                                     the app already logged in.
 
-State is a short-lived signed JWT (same HS256 secret as sessions) carrying a
-nonce + optional guest_id, so there's no server-side session store and the
-callback is CSRF-protected. The Google *client secret* is read from env only.
+State is a short-lived signed JWT (same HS256 secret as sessions) carrying
+only a nonce, so there's no server-side session store and the callback is
+CSRF-protected. The Google *client secret* is read from env only.
+
+Like email signup, Google login always resolves to either an EXISTING
+account or a FRESH one — there is no guest-to-account carryover (only
+signed-in accounts persist data; guest work is intentionally left to the
+48h purge).
 """
 
 import time
@@ -17,12 +23,13 @@ import urllib.parse
 
 import httpx
 import jwt
-from fastapi import APIRouter, Header, Query
+from fastapi import APIRouter, Query
 from fastapi.responses import RedirectResponse
 
 from .. import db
-from ..auth import AuthError, mint_account_token, new_user_id, normalize_email, verify_token
+from ..auth import AuthError, mint_account_token, new_user_id, normalize_email
 from ..config import get_settings
+from ..cookies import set_session_cookie
 from ..provisioning import first_workspace, provision_workspace
 
 router = APIRouter(prefix="/api/auth/google", tags=["auth"])
@@ -37,35 +44,24 @@ _STATE_TTL_SECONDS = 600  # 10 min — a login should complete well within this
 _jwks_client = jwt.PyJWKClient(_GOOGLE_JWKS_URL)
 
 
-def _guest_id(authorization: str) -> str | None:
-    """The caller's guest id if they present a valid anonymous token — so a
-    Google login upgrades that guest in place instead of orphaning their work."""
-    if not authorization.lower().startswith("bearer "):
-        return None
-    try:
-        claims = verify_token(authorization[7:].strip())
-    except AuthError:
-        return None
-    return claims["sub"] if claims.get("is_anonymous") else None
-
-
-def _sign_state(guest_id: str | None) -> str:
+def _sign_state() -> str:
     now = int(time.time())
     return jwt.encode(
-        {"nonce": new_user_id(), "guest_id": guest_id, "iat": now, "exp": now + _STATE_TTL_SECONDS},
+        {"nonce": new_user_id(), "iat": now, "exp": now + _STATE_TTL_SECONDS},
         get_settings().auth_jwt_secret,
         algorithm="HS256",
     )
 
 
-def _read_state(state: str) -> str | None:
-    """Returns the carried guest_id. Raises on a tampered/expired state."""
-    claims = jwt.decode(state, get_settings().auth_jwt_secret, algorithms=["HS256"])
-    return claims.get("guest_id")
+def _verify_state(state: str) -> None:
+    """Raises on a tampered/expired state; the nonce itself is never checked
+    against anything (single-use is not required — it's expiry + signature
+    that make this CSRF-safe, matching the guest/account cookie's own model)."""
+    jwt.decode(state, get_settings().auth_jwt_secret, algorithms=["HS256"])
 
 
 @router.get("/start")
-async def google_start(authorization: str = Header(default="")) -> RedirectResponse:
+async def google_start() -> RedirectResponse:
     s = get_settings()
     if not s.google_enabled:
         raise AuthError(503, "Google sign-in is not configured.")
@@ -74,7 +70,7 @@ async def google_start(authorization: str = Header(default="")) -> RedirectRespo
         "redirect_uri": s.google_redirect_uri,
         "response_type": "code",
         "scope": "openid email profile",
-        "state": _sign_state(_guest_id(authorization)),
+        "state": _sign_state(),
         "access_type": "online",
         "prompt": "select_account",
     }
@@ -82,9 +78,6 @@ async def google_start(authorization: str = Header(default="")) -> RedirectRespo
 
 
 def _fail_redirect(reason: str) -> RedirectResponse:
-    # Land back on the app with a flag rather than a bare error — the guest
-    # session still works, the upgrade just didn't complete (mirrors the TS
-    # callback's behaviour).
     base = get_settings().google_post_login_redirect
     sep = "&" if "?" in base else "?"
     return RedirectResponse(f"{base}{sep}link=error&reason={urllib.parse.quote(reason)}")
@@ -130,52 +123,29 @@ def _verify_id_token(id_token: str) -> dict:
     return claims
 
 
-def _upsert_google_user(email: str, guest_id: str | None) -> tuple[str, object, object]:
-    """Find, create, or upgrade the account for a verified Google email.
-    Returns (user_id, org_id, deal_id)."""
+def _find_or_create_google_user(email: str) -> str:
+    """Returns the user id for a verified Google email — an existing account,
+    or a fresh one (no password_hash — this account authenticates only via
+    Google)."""
     with db.admin_tx() as cur:
         cur.execute(
             "SELECT id FROM users WHERE lower(email) = %s AND is_anonymous = false LIMIT 1",
             (email,),
         )
         existing = cur.fetchone()
-
         if existing:
-            # Returning Google user — log them into their own workspace.
             user_id = existing["id"]
             org_id, deal_id = first_workspace(cur, user_id)
             if org_id is None:
-                org_id, deal_id = provision_workspace(
-                    cur, user_id, "Workspace", f"org-{user_id}", "First proposal"
-                )
-            return str(user_id), org_id, deal_id
+                provision_workspace(cur, user_id, "Workspace", f"org-{user_id}", "First proposal")
+            return str(user_id)
 
-        if guest_id:
-            # Upgrade the guest in place — keeps their id, org and uploads.
-            cur.execute(
-                "UPDATE users SET email = %s, is_anonymous = false "
-                "WHERE id = %s AND is_anonymous = true RETURNING id",
-                (email, guest_id),
-            )
-            if cur.fetchone():
-                cur.execute("UPDATE team_members SET email = %s WHERE user_id = %s", (email, guest_id))
-                org_id, deal_id = first_workspace(cur, guest_id)
-                if org_id is None:
-                    org_id, deal_id = provision_workspace(
-                        cur, guest_id, "Workspace", f"org-{guest_id}", "First proposal"
-                    )
-                return guest_id, org_id, deal_id
-
-        # Fresh account (no guest to upgrade, no prior Google user). No
-        # password_hash — this account authenticates only via Google.
         user_id = new_user_id()
         cur.execute(
             "INSERT INTO users (id, email, is_anonymous) VALUES (%s, %s, false)", (user_id, email)
         )
-        org_id, deal_id = provision_workspace(
-            cur, user_id, "Workspace", f"org-{user_id}", "First proposal"
-        )
-        return user_id, org_id, deal_id
+        provision_workspace(cur, user_id, "Workspace", f"org-{user_id}", "First proposal")
+        return user_id
 
 
 @router.get("/callback")
@@ -188,7 +158,7 @@ async def google_callback(
         return _fail_redirect("missing_code")
 
     try:
-        guest_id = _read_state(state)
+        _verify_state(state)
     except jwt.InvalidTokenError:
         return _fail_redirect("bad_state")
 
@@ -199,10 +169,9 @@ async def google_callback(
         return _fail_redirect("verify_failed")
 
     email = normalize_email(claims["email"])
-    user_id, _org_id, _deal_id = _upsert_google_user(email, guest_id)
+    user_id = _find_or_create_google_user(email)
     token = mint_account_token(user_id)
 
-    # Hand the token to the SPA via a fragment — fragments aren't sent to
-    # servers or logged in access logs, unlike a query string.
-    base = get_settings().google_post_login_redirect
-    return RedirectResponse(f"{base}#access_token={urllib.parse.quote(token)}&link=ok")
+    response = RedirectResponse(get_settings().google_post_login_redirect)
+    set_session_cookie(response, token, get_settings().auth_account_token_ttl_seconds)
+    return response

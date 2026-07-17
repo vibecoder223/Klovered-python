@@ -43,6 +43,14 @@ class Settings(BaseSettings):
 
     cron_secret: str = ""
 
+    # Session cookie — shared by the marketing site (/login, /signup) and the
+    # tool (/app) because both are served from the SAME domain (see Caddyfile
+    # path routing). This is what makes "log in on marketing, land in the tool
+    # already authenticated" work with no token in the URL. secure=false only
+    # for plain-HTTP local/IP testing; must be true once served over HTTPS.
+    session_cookie_name: str = "klovered_session"
+    session_cookie_secure: bool = False
+
     # Google OAuth (replaces Supabase's linkIdentity Google leg). The client id
     # is public; the secret must live only in .env, never in the repo. Google
     # rejects raw-IP redirect URIs — google_redirect_uri must be localhost (for

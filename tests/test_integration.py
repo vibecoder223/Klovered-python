@@ -78,3 +78,65 @@ def test_parse_probe(client, guest):
     assert r.status_code == 200
     assert r.json()["block_count"] >= 1
     assert r.json()["parse_ms"] >= 0
+
+
+# ---------- session cookie: the marketing<->tool hand-off ----------
+
+
+def _unique_email() -> str:
+    import uuid
+
+    return f"cookie-test-{uuid.uuid4().hex[:12]}@example.com"
+
+
+def test_signup_sets_cookie_that_authenticates_without_a_header(client):
+    email = _unique_email()
+    r = client.post("/api/auth/signup", json={"email": email, "password": "correcthorse123"})
+    assert r.status_code == 200, r.text
+    assert client.cookies.get("klovered_session")
+
+    # No Authorization header at all — only the cookie the client now holds.
+    r2 = client.get("/api/pipeline/whoami")
+    assert r2.status_code == 200
+    assert r2.json()["org_id"] == r.json()["org_id"]
+    assert r2.json()["is_anonymous"] is False
+
+
+def test_login_sets_cookie(client):
+    email = _unique_email()
+    client.post("/api/auth/signup", json={"email": email, "password": "correcthorse123"})
+    client.cookies.clear()
+
+    r = client.post("/api/auth/login", json={"email": email, "password": "correcthorse123"})
+    assert r.status_code == 200, r.text
+    assert client.cookies.get("klovered_session")
+
+
+def test_signup_does_not_carry_over_guest_work(client, guest):
+    """The dropped Journey C: signing up must NOT upgrade a concurrent guest
+    session — a signed-up account always starts with its OWN fresh org, never
+    the guest's. Only signed-in accounts persist data, by design."""
+    g = guest()
+    email = _unique_email()
+
+    r = client.post(
+        "/api/auth/signup",
+        json={"email": email, "password": "correcthorse123"},
+        headers=_auth(g["access_token"]),  # a guest token present, but must be ignored
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["org_id"] != g["org_id"]
+    assert r.json()["user_id"] != g["user_id"]
+
+
+def test_logout_clears_the_cookie(client):
+    email = _unique_email()
+    client.post("/api/auth/signup", json={"email": email, "password": "correcthorse123"})
+    assert client.cookies.get("klovered_session")
+
+    r = client.post("/api/auth/logout")
+    assert r.status_code == 200
+    assert client.cookies.get("klovered_session") is None
+
+    r2 = client.get("/api/pipeline/whoami")
+    assert r2.status_code == 401

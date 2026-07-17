@@ -1,0 +1,62 @@
+# Full Droplet stack: FastAPI backend + Next.js marketing site + Caddy, on one
+# box, using DO Managed Postgres (no bundled db — the Droplet is in the VPC).
+#
+# Expected clone layout (siblings):
+#   ~/Klovered-python           (this repo — run compose from here)
+#   ~/klovered-landing-human    (the marketing repo, i.e. Propello-LandingPage)
+#
+# Setup on the Droplet (once):
+#   cd ~/Klovered-python
+#   cp .env.example .env      # fill DB / AUTH_JWT_SECRET / MISTRAL / DOMAIN / etc.
+#   docker compose -f docker-compose.stack.yml build
+#   docker compose -f docker-compose.stack.yml run --rm api python scripts/apply_schema.py
+#   docker compose -f docker-compose.stack.yml up -d
+
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      STORAGE_DIR: /data/uploads
+    volumes:
+      - uploads:/data/uploads
+    expose:
+      - "8000"
+
+  web:
+    build:
+      context: ../klovered-landing-human
+      args:
+        # NEXT_PUBLIC_* is inlined at build time — where the CTAs point must be
+        # known now. Set NEXT_PUBLIC_APP_URL in .env before building.
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-}
+    restart: unless-stopped
+    # Runtime-only secrets (server-side /api/contact via Resend).
+    environment:
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      CONTACT_TO_EMAIL: ${CONTACT_TO_EMAIL:-}
+      RESEND_FROM: ${RESEND_FROM:-}
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+      - web
+    environment:
+      DOMAIN: ${DOMAIN:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  uploads:
+  caddy_data:
+  caddy_config:

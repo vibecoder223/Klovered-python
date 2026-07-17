@@ -23,13 +23,14 @@ import urllib.parse
 
 import httpx
 import jwt
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import RedirectResponse
 
 from .. import db
 from ..auth import AuthError, mint_account_token, new_user_id, normalize_email
 from ..config import get_settings
 from ..cookies import set_session_cookie
+from ..deps import GuestContext, optional_guest
 from ..provisioning import first_workspace, provision_workspace
 
 router = APIRouter(prefix="/api/auth/google", tags=["auth"])
@@ -123,10 +124,13 @@ def _verify_id_token(id_token: str) -> dict:
     return claims
 
 
-def _find_or_create_google_user(email: str) -> str:
-    """Returns the user id for a verified Google email — an existing account,
-    or a fresh one (no password_hash — this account authenticates only via
-    Google)."""
+def _resolve_google_user(email: str, guest: GuestContext | None) -> str:
+    """Returns the user id for a verified Google email. Resolution order:
+    1. an EXISTING account with that email wins (sign in to it);
+    2. else, if the caller is an anonymous guest, UPGRADE that guest in place —
+       same id, same org, same data — now a permanent Google account;
+    3. else, a fresh Google-only account (no password_hash).
+    """
     with db.admin_tx() as cur:
         cur.execute(
             "SELECT id FROM users WHERE lower(email) = %s AND is_anonymous = false LIMIT 1",
@@ -135,10 +139,20 @@ def _find_or_create_google_user(email: str) -> str:
         existing = cur.fetchone()
         if existing:
             user_id = existing["id"]
-            org_id, deal_id = first_workspace(cur, user_id)
+            org_id, _ = first_workspace(cur, user_id)
             if org_id is None:
                 provision_workspace(cur, user_id, "Workspace", f"org-{user_id}", "First proposal")
             return str(user_id)
+
+        if guest and guest.is_anonymous:
+            cur.execute(
+                "UPDATE users SET email = %s, is_anonymous = false "
+                "WHERE id = %s AND is_anonymous = true RETURNING id",
+                (email, guest.user_id),
+            )
+            row = cur.fetchone()
+            if row:  # guest upgraded in place, org + data kept
+                return str(row["id"])
 
         user_id = new_user_id()
         cur.execute(
@@ -150,7 +164,9 @@ def _find_or_create_google_user(email: str) -> str:
 
 @router.get("/callback")
 async def google_callback(
-    code: str = Query(default=""), state: str = Query(default="")
+    code: str = Query(default=""),
+    state: str = Query(default=""),
+    guest: GuestContext | None = Depends(optional_guest),
 ) -> RedirectResponse:
     if not get_settings().google_enabled:
         raise AuthError(503, "Google sign-in is not configured.")
@@ -169,7 +185,7 @@ async def google_callback(
         return _fail_redirect("verify_failed")
 
     email = normalize_email(claims["email"])
-    user_id = _find_or_create_google_user(email)
+    user_id = _resolve_google_user(email, guest)
     token = mint_account_token(user_id)
 
     response = RedirectResponse(get_settings().google_post_login_redirect)

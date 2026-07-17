@@ -137,3 +137,120 @@ async def documents_process(
     background_tasks.add_task(job_queue.drain_once)
 
     return {"ok": True, "queued": True}
+
+
+@router.get("/documents/{document_id}")
+async def document_status(document_id: str, ctx: GuestContext = Depends(require_guest)):
+    """Poll an RFP's processing status. RLS scopes to the caller's org, so a
+    foreign id reads as 404."""
+    with db.user_tx(ctx.user_id) as cur:
+        cur.execute(
+            "SELECT id, filename, processing_status, error_message FROM documents WHERE id = %s",
+            (document_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    return {
+        "id": str(row["id"]),
+        "filename": row["filename"],
+        "processing_status": row["processing_status"],
+        "error_message": row["error_message"],
+    }
+
+
+@router.delete("/documents/{document_id}")
+async def document_delete(document_id: str, ctx: GuestContext = Depends(require_guest)):
+    """Remove an RFP (and its cascade of chunks/questions/responses/citations),
+    freeing the one-RFP-per-session cap. RLS makes the lookup+delete tenant-safe;
+    the job rows and the stored file are cleaned up out of band."""
+    with db.user_tx(ctx.user_id) as cur:
+        cur.execute("SELECT file_path FROM documents WHERE id = %s", (document_id,))
+        row = cur.fetchone()
+        if not row:
+            return JSONResponse(status_code=404, content={"error": "Not found"})
+        file_path = row["file_path"]
+        cur.execute("DELETE FROM documents WHERE id = %s", (document_id,))
+    with db.admin_tx() as cur:
+        cur.execute("DELETE FROM jobs WHERE document_id = %s", (document_id,))
+    try:
+        storage.delete(file_path)
+    except Exception:  # noqa: BLE001 — the row is already gone; a missing file is fine
+        pass
+    return {"ok": True}
+
+
+@router.get("/deals/{deal_id}/answers")
+async def deal_answers(deal_id: str, ctx: GuestContext = Depends(require_guest)):
+    """Step-3 read for the tool: every requirement-question for the deal's RFP,
+    each with its drafted answer + citations, plus each RFP document's processing
+    status so the client can poll progress from one call. Shape matches what the
+    tool's AnswersList renders. RLS scopes to the caller's org; a foreign deal_id
+    returns empty."""
+    with db.user_tx(ctx.user_id) as cur:
+        cur.execute(
+            "SELECT id, filename, processing_status, error_message "
+            "FROM documents WHERE deal_id = %s ORDER BY created_at",
+            (deal_id,),
+        )
+        docs = cur.fetchall()
+        doc_ids = [d["id"] for d in docs]
+
+        questions = []
+        if doc_ids:
+            cur.execute(
+                "SELECT q.id, q.question_text, q.status, "
+                "r.id AS response_id, r.draft_text, r.confidence, r.gap_flag "
+                "FROM questions q LEFT JOIN responses r ON r.question_id = q.id "
+                "WHERE q.document_id = ANY(%s) ORDER BY q.created_at",
+                (doc_ids,),
+            )
+            qrows = cur.fetchall()
+
+            resp_ids = [q["response_id"] for q in qrows if q["response_id"]]
+            cites_by_resp: dict = {}
+            if resp_ids:
+                cur.execute(
+                    "SELECT response_id, chunk_id, document_filename, page "
+                    "FROM citations WHERE response_id = ANY(%s)",
+                    (resp_ids,),
+                )
+                for c in cur.fetchall():
+                    cites_by_resp.setdefault(c["response_id"], []).append(
+                        {
+                            "chunk_id": str(c["chunk_id"]) if c["chunk_id"] else None,
+                            "filename": c["document_filename"],
+                            "page_start": c["page"],
+                        }
+                    )
+
+            for q in qrows:
+                resp = None
+                if q["response_id"]:
+                    resp = {
+                        "answer_text": q["draft_text"],
+                        "confidence": float(q["confidence"]) if q["confidence"] is not None else None,
+                        "gap_flag": q["gap_flag"],
+                        "citations": cites_by_resp.get(q["response_id"], []),
+                    }
+                questions.append(
+                    {
+                        "id": str(q["id"]),
+                        "question_text": q["question_text"],
+                        "status": q["status"],
+                        "response": resp,
+                    }
+                )
+
+    return {
+        "questions": questions,
+        "documents": [
+            {
+                "id": str(d["id"]),
+                "filename": d["filename"],
+                "processing_status": d["processing_status"],
+                "error_message": d["error_message"],
+            }
+            for d in docs
+        ],
+    }

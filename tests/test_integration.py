@@ -158,6 +158,71 @@ def test_signup_duplicate_email_conflicts(client, guest):
     assert "already exists" in r.json()["error"]
 
 
+# ---------- answers read + document status/delete ----------
+
+
+def test_deal_answers_empty_for_fresh_guest(client, guest):
+    g = guest()
+    r = client.get(f"/api/pipeline/deals/{g['deal_id']}/answers", headers=_auth(g["access_token"]))
+    assert r.status_code == 200, r.text
+    assert r.json() == {"questions": [], "documents": []}
+
+
+def test_deal_answers_isolation(client, guest):
+    a = guest()
+    b = guest()
+    # B asks for A's deal — RLS hides it, so it reads as empty, never A's data.
+    r = client.get(f"/api/pipeline/deals/{a['deal_id']}/answers", headers=_auth(b["access_token"]))
+    assert r.status_code == 200
+    assert r.json() == {"questions": [], "documents": []}
+
+
+def test_document_status_and_delete_frees_cap(client, guest):
+    g = guest()
+    up = client.post(
+        "/api/pipeline/documents/upload",
+        headers=_auth(g["access_token"]),
+        data={"deal_id": g["deal_id"]},
+        files={"file": SAMPLE},
+    )
+    assert up.status_code == 200, up.text
+    doc_id = up.json()["document"]["id"]
+
+    st = client.get(f"/api/pipeline/documents/{doc_id}", headers=_auth(g["access_token"]))
+    assert st.status_code == 200
+    assert st.json()["processing_status"] == "uploaded"
+
+    # Now the deal is at its one-RFP cap; a second upload is refused.
+    cap = client.post(
+        "/api/pipeline/documents/upload",
+        headers=_auth(g["access_token"]),
+        data={"deal_id": g["deal_id"]},
+        files={"file": SAMPLE},
+    )
+    assert cap.status_code == 403
+
+    dl = client.delete(f"/api/pipeline/documents/{doc_id}", headers=_auth(g["access_token"]))
+    assert dl.status_code == 200
+
+    # After delete the doc is gone and the cap is freed.
+    assert client.get(f"/api/pipeline/documents/{doc_id}", headers=_auth(g["access_token"])).status_code == 404
+    again = client.post(
+        "/api/pipeline/documents/upload",
+        headers=_auth(g["access_token"]),
+        data={"deal_id": g["deal_id"]},
+        files={"file": SAMPLE},
+    )
+    assert again.status_code == 200, again.text
+
+
+def test_document_status_unknown_is_404(client, guest):
+    g = guest()
+    import uuid
+
+    r = client.get(f"/api/pipeline/documents/{uuid.uuid4()}", headers=_auth(g["access_token"]))
+    assert r.status_code == 404
+
+
 def test_logout_clears_the_cookie(client):
     email = _unique_email()
     client.post("/api/auth/signup", json={"email": email, "password": "correcthorse123"})

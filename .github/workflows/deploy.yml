@@ -31,11 +31,21 @@ jobs:
             set -e
             cd ~/Klovered-python
             git pull --ff-only
-            docker compose -f docker-compose.prod.yml build
+
+            # klovered.com runs the FULL stack (web + caddy + api) from
+            # docker-compose.stack.yml, brought up from this directory so the
+            # compose project is the default "klovered-python". A BACKEND change
+            # must update ONLY the api service in place — never rebuild or
+            # restart the marketing web or caddy — so the live site is
+            # unaffected. (Marketing/web deploys are handled separately.)
+            COMPOSE="docker compose -f docker-compose.stack.yml"
+
+            $COMPOSE build api
             # Idempotent: creates/updates tables, app_user, RLS on DO Managed PG
-            # (reachable from the Droplet's private VPC endpoint).
-            docker compose -f docker-compose.prod.yml run --rm api python scripts/apply_schema.py
-            docker compose -f docker-compose.prod.yml up -d
+            # (reachable from the Droplet's private VPC endpoint). One-off container.
+            $COMPOSE run --rm api python scripts/apply_schema.py
+            # Recreate ONLY api; --no-deps leaves web + caddy running untouched.
+            $COMPOSE up -d --no-deps api
             sleep 4
-            docker compose -f docker-compose.prod.yml exec -T api python -c "import httpx; print(httpx.get('http://localhost:8000/health').text)"
+            $COMPOSE exec -T api python -c "import httpx; print(httpx.get('http://localhost:8000/health').text)"
             docker image prune -f

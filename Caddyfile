@@ -11,7 +11,10 @@
 {$DOMAIN} {
 	encode zstd gzip
 
-	@backend path /health /api/auth/* /api/pipeline/* /api/knowledge/* /api/cron/*
+	# /api/knowledge needs BOTH the bare path (GET list, no id) and the
+	# wildcard (GET/DELETE by id) — Caddy's "/x/*" matcher does not match the
+	# bare "/x" with nothing after the slash.
+	@backend path /health /api/auth/* /api/pipeline/* /api/knowledge /api/knowledge/* /api/cron/*
 	handle @backend {
 		reverse_proxy api:8000
 	}

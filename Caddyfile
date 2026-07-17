@@ -1,8 +1,15 @@
-# Caddy reverse proxy — one box, two apps (FastAPI backend + Next.js marketing).
+# Caddy reverse proxy — one box, three apps (FastAPI backend + Next.js
+# marketing + Next.js tool). Auto-HTTPS via Let's Encrypt.
 #
 # Set DOMAIN in .env:
-#   • a real domain (e.g. klovered.io) → Caddy auto-issues + renews HTTPS
-#   • :80                              → plain HTTP on the IP (no domain yet)
+#   • "klovered.com www.klovered.com"  → space-separated list, real domains.
+#     Caddy auto-issues + renews an HTTPS cert for EACH host listed, and the
+#     @www redirect below sends www traffic to the apex so there's one
+#     canonical URL. Both hostnames must already resolve (DNS A record) to
+#     this Droplet's IP, or cert issuance for that host fails.
+#   • "klovered.com"                   → apex only, no www redirect needed.
+#   • :80                              → plain HTTP on the IP, no TLS (no
+#     domain pointed here yet).
 #
 # Routing is by prefix, NOT a blanket /api/* → api, because the marketing site
 # has its OWN /api/contact route. Only the backend's known prefixes go to the
@@ -10,6 +17,12 @@
 
 {$DOMAIN} {
 	encode zstd gzip
+
+	# Canonicalize on the apex domain. Only fires when DOMAIN actually
+	# includes www.klovered.com (see comment above) — harmless no-op
+	# otherwise, e.g. under :80 or an apex-only DOMAIN.
+	@www host www.klovered.com
+	redir @www https://klovered.com{uri} permanent
 
 	# /api/knowledge needs BOTH the bare path (GET list, no id) and the
 	# wildcard (GET/DELETE by id) — Caddy's "/x/*" matcher does not match the

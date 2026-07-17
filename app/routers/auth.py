@@ -131,13 +131,20 @@ async def signup(
 @router.get("/me")
 async def me(ctx: GuestContext = Depends(require_guest)) -> dict:
     """Current session. The client uses this to decide whether to show a
-    "sign in" CTA or the account badge."""
+    "sign in" CTA or the account badge, and to resume the workspace (org + most
+    recent deal) without a separate call."""
     with db.user_tx(ctx.user_id) as cur:
         cur.execute("SELECT email, is_anonymous FROM users WHERE id = %s", (ctx.user_id,))
         row = cur.fetchone()
+        cur.execute(
+            "SELECT id FROM deals WHERE org_id = %s ORDER BY created_at DESC LIMIT 1",
+            (ctx.org_id,),
+        )
+        deal = cur.fetchone()
     return {
         "user_id": ctx.user_id,
         "org_id": ctx.org_id,
+        "deal_id": str(deal["id"]) if deal else None,
         "email": (row["email"] or None) if row else None,
         "is_anonymous": bool(row["is_anonymous"]) if row else ctx.is_anonymous,
     }

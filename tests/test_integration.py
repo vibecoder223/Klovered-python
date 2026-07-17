@@ -102,6 +102,16 @@ def test_signup_sets_cookie_that_authenticates_without_a_header(client):
     assert r2.json()["is_anonymous"] is False
 
 
+def test_me_returns_org_and_deal(client, guest):
+    g = guest()
+    r = client.get("/api/auth/me", headers=_auth(g["access_token"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["org_id"] == g["org_id"]
+    assert body["deal_id"] == g["deal_id"]  # tool resumes the workspace from this
+    assert body["is_anonymous"] is True
+
+
 def test_login_sets_cookie(client):
     email = _unique_email()
     client.post("/api/auth/signup", json={"email": email, "password": "correcthorse123"})

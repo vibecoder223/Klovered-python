@@ -16,6 +16,12 @@
 		reverse_proxy api:8000
 	}
 
+	# The tool (klovered-free) runs with Next basePath /app, so every one of its
+	# routes and assets lives under /app — this one rule covers them all.
+	handle /app* {
+		reverse_proxy tool:3100
+	}
+
 	handle {
 		reverse_proxy web:3000
 	}

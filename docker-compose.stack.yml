@@ -29,8 +29,9 @@ services:
       context: ../klovered-landing-human
       args:
         # NEXT_PUBLIC_* is inlined at build time — where the CTAs point must be
-        # known now. Set NEXT_PUBLIC_APP_URL in .env before building.
-        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-}
+        # known now. Defaults to the same-origin /app path where the tool is
+        # served; override in .env only for an off-domain tool.
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-/app}
     restart: unless-stopped
     # Runtime-only secrets (server-side /api/contact via Resend).
     environment:
@@ -39,6 +40,20 @@ services:
       RESEND_FROM: ${RESEND_FROM:-}
     expose:
       - "3000"
+
+  # The guest-first RFP tool (klovered-free), served at klovered.com/app. Thin
+  # client: it calls the api service via /api/* (same origin through Caddy), so
+  # it needs no DB/secret of its own. Cloned as a sibling on the Droplet.
+  tool:
+    build:
+      context: ../klovered-free
+      args:
+        # Same-origin in production; the marketing site is the domain root.
+        NEXT_PUBLIC_API_BASE: ""
+        NEXT_PUBLIC_MARKETING_URL: "/"
+    restart: unless-stopped
+    expose:
+      - "3100"
 
   caddy:
     image: caddy:2-alpine

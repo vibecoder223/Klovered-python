@@ -17,12 +17,20 @@ begin
 end $$;
 
 -- ---------- tables ----------
+-- A guest and a real account are both rows here; `is_anonymous` is the only
+-- difference. Upgrading a guest in place (set email/password_hash, flip the
+-- flag) keeps their id — so their org and every uploaded doc carry over.
 create table if not exists users (
-  id           uuid primary key default gen_random_uuid(),
-  email        text not null default '',
-  is_anonymous boolean not null default true,
-  created_at   timestamptz not null default now()
+  id            uuid primary key default gen_random_uuid(),
+  email         text not null default '',
+  password_hash text,
+  is_anonymous  boolean not null default true,
+  created_at    timestamptz not null default now()
 );
+-- Real accounts need a unique email; guests all share email = '' so they're
+-- excluded from the constraint. lower() makes it case-insensitive.
+create unique index if not exists idx_users_email_unique
+  on users (lower(email)) where email <> '';
 
 create table if not exists organizations (
   id         uuid primary key default gen_random_uuid(),
@@ -247,6 +255,7 @@ create or replace function current_user_org_ids() returns setof uuid
 $$ select org_id from team_members where user_id = current_user_id() $$;
 
 -- ---------- RLS ----------
+alter table users         enable row level security;
 alter table organizations enable row level security;
 alter table team_members  enable row level security;
 alter table org_settings  enable row level security;
@@ -260,6 +269,15 @@ alter table responses               enable row level security;
 alter table citations                enable row level security;
 alter table agent_runs              enable row level security;
 alter table jobs                    enable row level security;
+
+-- users holds password_hash, and app_user has table-level SELECT on everything
+-- in this schema — so without RLS any signed-in caller could read every
+-- account's hash. SELECT-only, own-row-only: writes to users (guest creation,
+-- signup upgrade) all run on the admin connection, which bypasses RLS anyway,
+-- so the request path never needs insert/update/delete here.
+drop policy if exists users_self on users;
+create policy users_self on users for select
+  using (id = current_user_id());
 
 drop policy if exists org_member on organizations;
 create policy org_member on organizations for select

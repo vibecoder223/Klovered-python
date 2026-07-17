@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # only this service verifies tokens.
     auth_jwt_secret: str = "dev-secret-change-me"
     auth_token_ttl_seconds: int = 60 * 60 * 24  # 24h guest session
+    # Real accounts get a longer session than throwaway guests — their data
+    # isn't on the 48h purge clock, so there's no reason to log them out daily.
+    auth_account_token_ttl_seconds: int = 60 * 60 * 24 * 30  # 30d
 
     # Local-disk storage (replaces Supabase Storage / Spaces). Swap for an S3
     # adapter later without touching callers.

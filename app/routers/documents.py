@@ -254,6 +254,7 @@ async def deal_answers(deal_id: str, ctx: GuestContext = Depends(require_guest))
                 resp = None
                 if q["response_id"]:
                     resp = {
+                        "id": str(q["response_id"]),  # for PATCH /responses/{id} (edit)
                         "answer_text": q["draft_text"],
                         "confidence": float(q["confidence"]) if q["confidence"] is not None else None,
                         "gap_flag": q["gap_flag"],

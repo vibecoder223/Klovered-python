@@ -227,12 +227,11 @@ class AnswerEdit(BaseModel):
 async def edit_response(
     response_id: str, body: AnswerEdit, ctx: GuestContext = Depends(require_guest)
 ):
-    """Edit a drafted answer. Signed-in accounts only (guests get a nudge to
-    sign in). RLS scopes the update to the caller's org(s), so a shared deal's
-    answer is editable by EITHER collaborator, and a foreign response reads as a
-    404 rather than updating anyone else's row."""
-    if ctx.is_anonymous:
-        return JSONResponse(status_code=403, content={"error": "Sign in to edit answers."})
+    """Edit a drafted answer. Available to guests and signed-in accounts alike.
+    RLS scopes the update to the caller's org(s), so a caller can only ever edit
+    their own deal's answers (a shared deal's answer is editable by EITHER
+    collaborator), and a foreign response reads as a 404 rather than updating
+    anyone else's row."""
     with db.user_tx(ctx.user_id) as cur:
         cur.execute(
             "UPDATE responses SET draft_text = %s, updated_at = now() WHERE id = %s RETURNING id",

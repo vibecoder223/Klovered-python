@@ -258,10 +258,12 @@ def test_document_status_unknown_is_404(client, guest):
     assert r.status_code == 404
 
 
-# ---------- edit answers (signed-in only) ----------
+# ---------- edit answers (guests + signed-in) ----------
 
 
-def test_edit_response_requires_signin(client, guest):
+def test_edit_response_guest_unknown_is_404(client, guest):
+    """Guests can edit their own answers now. A guest PATCH reaches the UPDATE;
+    RLS hides a foreign/unknown response, so it reads as 404 (not 403)."""
     import uuid
 
     g = guest()
@@ -270,7 +272,7 @@ def test_edit_response_requires_signin(client, guest):
         json={"answer_text": "edited"},
         headers=_auth(g["access_token"]),
     )
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 def test_edit_response_signed_in_unknown_is_404(client):

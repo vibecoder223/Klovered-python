@@ -233,6 +233,64 @@ def test_document_status_unknown_is_404(client, guest):
     assert r.status_code == 404
 
 
+# ---------- edit answers (signed-in only) ----------
+
+
+def test_edit_response_requires_signin(client, guest):
+    import uuid
+
+    g = guest()
+    r = client.patch(
+        f"/api/pipeline/responses/{uuid.uuid4()}",
+        json={"answer_text": "edited"},
+        headers=_auth(g["access_token"]),
+    )
+    assert r.status_code == 403
+
+
+def test_edit_response_signed_in_unknown_is_404(client):
+    import uuid
+
+    s = client.post("/api/auth/signup", json={"email": _unique_email(), "password": "correcthorse123"}).json()
+    r = client.patch(
+        f"/api/pipeline/responses/{uuid.uuid4()}",
+        json={"answer_text": "edited"},
+        headers=_auth(s["access_token"]),
+    )
+    assert r.status_code == 404  # signed-in path reached the UPDATE; RLS hid the row
+
+
+# ---------- invite one collaborator ----------
+
+
+def test_invite_requires_signin(client, guest):
+    g = guest()
+    r = client.post("/api/auth/invite", headers=_auth(g["access_token"]))
+    assert r.status_code == 403
+
+
+def test_invite_flow_shares_workspace_and_caps_at_two(client):
+    owner = client.post("/api/auth/signup", json={"email": _unique_email(), "password": "correcthorse123"}).json()
+    inv = client.post("/api/auth/invite", headers=_auth(owner["access_token"]))
+    assert inv.status_code == 200, inv.text
+    token = inv.json()["token"]
+
+    invitee = client.post("/api/auth/signup", json={"email": _unique_email(), "password": "correcthorse123"}).json()
+    acc = client.post("/api/auth/invite/accept", json={"token": token}, headers=_auth(invitee["access_token"]))
+    assert acc.status_code == 200, acc.text
+    assert acc.json()["org_id"] == owner["org_id"]  # invitee joined the owner's org
+
+    # Owner's workspace is now full — a new invite is refused (cap of 2).
+    full = client.post("/api/auth/invite", headers=_auth(owner["access_token"]))
+    assert full.status_code == 409
+
+
+def test_invite_accept_bad_token_is_404(client):
+    s = client.post("/api/auth/signup", json={"email": _unique_email(), "password": "correcthorse123"}).json()
+    r = client.post("/api/auth/invite/accept", json={"token": "nope"}, headers=_auth(s["access_token"]))
+    assert r.status_code == 404
+
+
 def test_logout_clears_the_cookie(client):
     email = _unique_email()
     client.post("/api/auth/signup", json={"email": email, "password": "correcthorse123"})

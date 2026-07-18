@@ -11,6 +11,7 @@ import time
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from .. import db, storage
 from ..config import get_settings
@@ -178,6 +179,31 @@ async def document_delete(document_id: str, ctx: GuestContext = Depends(require_
     except Exception:  # noqa: BLE001 — the row is already gone; a missing file is fine
         pass
     return {"ok": True}
+
+
+class AnswerEdit(BaseModel):
+    answer_text: str
+
+
+@router.patch("/responses/{response_id}")
+async def edit_response(
+    response_id: str, body: AnswerEdit, ctx: GuestContext = Depends(require_guest)
+):
+    """Edit a drafted answer. Signed-in accounts only (guests get a nudge to
+    sign in). RLS scopes the update to the caller's org(s), so a shared deal's
+    answer is editable by EITHER collaborator, and a foreign response reads as a
+    404 rather than updating anyone else's row."""
+    if ctx.is_anonymous:
+        return JSONResponse(status_code=403, content={"error": "Sign in to edit answers."})
+    with db.user_tx(ctx.user_id) as cur:
+        cur.execute(
+            "UPDATE responses SET draft_text = %s, updated_at = now() WHERE id = %s RETURNING id",
+            (body.answer_text, response_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    return {"ok": True, "id": str(row["id"]), "answer_text": body.answer_text}
 
 
 @router.get("/deals/{deal_id}/answers")

@@ -218,6 +218,24 @@ create table if not exists jobs (
 create unique index if not exists idx_jobs_live_unique on jobs (document_id, stage, coalesce(target_id, '00000000-0000-0000-0000-000000000000'))
   where status in ('pending', 'claimed');
 
+-- Single-use share invites. A signed-in owner mints one to add exactly ONE
+-- collaborator to their org (the free tool's cap of 2 members total). Handled
+-- entirely on the admin connection (create + accept both cross org boundaries),
+-- so RLS is enabled with NO request-path policy — app_user can never read a
+-- token, and there is no per-tenant read path to leak them through.
+create table if not exists invites (
+  id           uuid primary key default gen_random_uuid(),
+  token        text not null unique,
+  org_id       uuid not null references organizations(id) on delete cascade,
+  deal_id      uuid references deals(id) on delete set null,
+  created_by   uuid references users(id),
+  expires_at   timestamptz not null,
+  accepted_by  uuid references users(id),
+  accepted_at  timestamptz,
+  created_at   timestamptz not null default now()
+);
+create index if not exists idx_invites_org on invites (org_id);
+
 -- claim_jobs: atomically lease up to p_limit pending, due jobs.
 create or replace function claim_jobs(p_limit int) returns setof jobs
   language plpgsql security definer set search_path = public as
@@ -302,6 +320,8 @@ alter table responses               enable row level security;
 alter table citations                enable row level security;
 alter table agent_runs              enable row level security;
 alter table jobs                    enable row level security;
+-- invites: RLS on, NO policy — only the admin (BYPASSRLS) connection touches it.
+alter table invites                 enable row level security;
 
 -- users holds password_hash, and app_user has table-level SELECT on everything
 -- in this schema — so without RLS any signed-in caller could read every

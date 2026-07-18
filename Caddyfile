@@ -32,6 +32,13 @@
 		reverse_proxy api:8000
 	}
 
+	# Self-hosted analytics (Umami) — dashboard + tracker script/collector for
+	# both the marketing site and the tool. Umami has its own login, so this
+	# path doesn't need a separate auth gate.
+	handle /analytics* {
+		reverse_proxy umami:3000
+	}
+
 	# The tool (klovered-free) runs with Next basePath /app, so every one of its
 	# routes and assets lives under /app — this one rule covers them all.
 	handle /app* {

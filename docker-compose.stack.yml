@@ -32,6 +32,9 @@ services:
         # known now. Defaults to the same-origin /app path where the tool is
         # served; override in .env only for an off-domain tool.
         NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-/app}
+        # Umami website id for THIS site (see the umami service below). Empty
+        # by default, so the tracker script only renders once you've set it.
+        NEXT_PUBLIC_UMAMI_WEBSITE_ID: ${NEXT_PUBLIC_UMAMI_WEBSITE_ID_WEB:-}
     restart: unless-stopped
     # Runtime-only secrets (server-side /api/contact via Resend).
     environment:
@@ -51,9 +54,30 @@ services:
         # Same-origin in production; the marketing site is the domain root.
         NEXT_PUBLIC_API_BASE: ""
         NEXT_PUBLIC_MARKETING_URL: "/"
+        # Separate Umami website id — the tool is tracked as its own site
+        # (different funnel: guest sessions, not marketing pageviews).
+        NEXT_PUBLIC_UMAMI_WEBSITE_ID: ${NEXT_PUBLIC_UMAMI_WEBSITE_ID_TOOL:-}
     restart: unless-stopped
     expose:
       - "3100"
+
+  # Self-hosted, first-party visitor analytics (Umami) for the marketing site
+  # and the tool — no third-party script, no cookie banner needed. Reverse
+  # proxied at /analytics (see Caddyfile), so it rides the same TLS cert with
+  # no extra DNS/subdomain. Uses its own database on the SAME Postgres server
+  # (a separate DB, not mixed into the app schema) — see UMAMI_DATABASE_URL.
+  umami:
+    image: ghcr.io/umami-software/umami:postgresql-latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${UMAMI_DATABASE_URL}
+      DATABASE_TYPE: postgresql
+      APP_SECRET: ${UMAMI_APP_SECRET}
+      # Required because Caddy exposes it under a path, not its own host.
+      BASE_PATH: /analytics
+      DISABLE_TELEMETRY: "1"
+    expose:
+      - "3000"
 
   caddy:
     image: caddy:2-alpine
@@ -61,6 +85,7 @@ services:
     depends_on:
       - api
       - web
+      - umami
     environment:
       DOMAIN: ${DOMAIN:-:80}
     ports:

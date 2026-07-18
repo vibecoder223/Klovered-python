@@ -36,6 +36,24 @@ async def whoami(ctx: GuestContext = Depends(require_guest)) -> dict:
     return {"user_id": ctx.user_id, "org_id": ctx.org_id, "is_anonymous": ctx.is_anonymous}
 
 
+@router.get("/limits")
+async def upload_limits(ctx: GuestContext = Depends(require_guest)) -> dict:
+    """Today's per-workspace upload usage, so the UI can show remaining quota
+    (3 knowledge + 3 RFP per calendar day, UTC)."""
+    with db.user_tx(ctx.user_id) as cur:
+        cur.execute(
+            "SELECT kind, count(*) AS n FROM upload_events WHERE org_id = %s "
+            "AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date "
+            "GROUP BY kind",
+            (ctx.org_id,),
+        )
+        used = {r["kind"]: r["n"] for r in cur.fetchall()}
+    return {
+        "knowledge": {"used": used.get("knowledge", 0), "cap": DAILY_RFP_CAP},
+        "rfp": {"used": used.get("rfp", 0), "cap": DAILY_RFP_CAP},
+    }
+
+
 @router.post("/parse")
 async def parse_probe(
     file: UploadFile = File(...),

@@ -236,6 +236,18 @@ create table if not exists invites (
 );
 create index if not exists idx_invites_org on invites (org_id);
 
+-- Append-only upload log for the per-workspace daily rate limit (3 RFP + 3
+-- knowledge uploads per calendar day, UTC). Append-only ON PURPOSE: deleting a
+-- document must NOT refund quota, so the cap counts upload EVENTS, not live rows.
+create table if not exists upload_events (
+  id         uuid primary key default gen_random_uuid(),
+  org_id     uuid not null references organizations(id) on delete cascade,
+  user_id    uuid references users(id),
+  kind       text not null,  -- 'knowledge' | 'rfp'
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_upload_events_org_kind_day on upload_events (org_id, kind, created_at);
+
 -- claim_jobs: atomically lease up to p_limit pending, due jobs.
 create or replace function claim_jobs(p_limit int) returns setof jobs
   language plpgsql security definer set search_path = public as
@@ -322,6 +334,7 @@ alter table agent_runs              enable row level security;
 alter table jobs                    enable row level security;
 -- invites: RLS on, NO policy — only the admin (BYPASSRLS) connection touches it.
 alter table invites                 enable row level security;
+alter table upload_events           enable row level security;
 
 -- users holds password_hash, and app_user has table-level SELECT on everything
 -- in this schema — so without RLS any signed-in caller could read every
@@ -396,6 +409,11 @@ create policy agent_runs_ro on agent_runs for select
 drop policy if exists jobs_ro on jobs;
 create policy jobs_ro on jobs for select
   using (org_id in (select current_user_org_ids()));
+
+drop policy if exists upload_events_rw on upload_events;
+create policy upload_events_rw on upload_events for all
+  using (org_id in (select current_user_org_ids()))
+  with check (org_id in (select current_user_org_ids()));
 
 -- ---------- grants ----------
 grant usage on schema public to app_user;

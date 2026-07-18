@@ -23,6 +23,9 @@ router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 # Free-tier caps, mirroring the TS route.
 MAX_DOCS = 10
 MAX_TOTAL_PAGES = 200
+# Per-workspace daily rate limit (calendar day, UTC), counted from the
+# append-only upload_events log so deletes don't refund quota.
+DAILY_UPLOAD_CAP = 3
 _DOC_TYPES = {"past_proposal", "security_doc", "policy", "other"}
 
 
@@ -72,6 +75,17 @@ async def upload_knowledge(
             (ctx.org_id,),
         )
         stats = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) AS n FROM upload_events WHERE org_id = %s AND kind = 'knowledge' "
+            "AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date",
+            (ctx.org_id,),
+        )
+        today = cur.fetchone()["n"]
+    if today >= DAILY_UPLOAD_CAP:
+        return JSONResponse(
+            status_code=429,
+            content={"error": f"Daily limit reached: {DAILY_UPLOAD_CAP} knowledge uploads per day. Try again tomorrow."},
+        )
     if stats["n"] >= MAX_DOCS:
         return JSONResponse(
             status_code=403,
@@ -105,6 +119,10 @@ async def upload_knowledge(
                 ),
             )
             kdoc_id = str(cur.fetchone()["id"])
+            cur.execute(
+                "INSERT INTO upload_events (org_id, user_id, kind) VALUES (%s, %s, 'knowledge')",
+                (ctx.org_id, ctx.user_id),
+            )
     except Exception as e:  # noqa: BLE001 — don't leave an orphaned file behind
         storage.delete(object_path)
         return JSONResponse(status_code=500, content={"error": f"insert failed: {e}"})

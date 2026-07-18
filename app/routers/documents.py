@@ -26,6 +26,10 @@ router = APIRouter(prefix="/api/pipeline", tags=["documents"])
 # stack PDF-parse memory spikes past the box's RAM.
 _upload_gate = threading.Semaphore(get_settings().max_concurrent_uploads)
 
+# Per-workspace daily RFP-upload rate limit (calendar day, UTC), counted from the
+# append-only upload_events log so deleting an RFP doesn't refund quota.
+DAILY_RFP_CAP = 3
+
 
 @router.get("/whoami")
 async def whoami(ctx: GuestContext = Depends(require_guest)) -> dict:
@@ -79,6 +83,17 @@ async def documents_upload(
                 content={"error": "Free limit: one RFP per session. Delete the current one first."},
             )
 
+        cur.execute(
+            "SELECT count(*) AS n FROM upload_events WHERE org_id = %s AND kind = 'rfp' "
+            "AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date",
+            (ctx.org_id,),
+        )
+        if cur.fetchone()["n"] >= DAILY_RFP_CAP:
+            return JSONResponse(
+                status_code=429,
+                content={"error": f"Daily limit reached: {DAILY_RFP_CAP} RFP uploads per day. Try again tomorrow."},
+            )
+
         storage.save(object_path, data)
         try:
             cur.execute(
@@ -87,6 +102,10 @@ async def documents_upload(
                 (deal_id, filename, object_path, len(data), file.content_type),
             )
             doc = cur.fetchone()
+            cur.execute(
+                "INSERT INTO upload_events (org_id, user_id, kind) VALUES (%s, %s, 'rfp')",
+                (ctx.org_id, ctx.user_id),
+            )
         except Exception as e:  # noqa: BLE001 — roll back the orphaned file
             storage.delete(object_path)
             return JSONResponse(status_code=500, content={"error": f"insert failed: {e}"})

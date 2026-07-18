@@ -19,6 +19,7 @@ from ..deps import GuestContext, require_guest
 from ..pipeline import jobs as job_queue
 from ..pipeline.llm import has_llm_key
 from ..pipeline.parse import parse_document
+from .knowledge import WEEKLY_UPLOAD_CAP
 
 router = APIRouter(prefix="/api/pipeline", tags=["documents"])
 
@@ -26,9 +27,9 @@ router = APIRouter(prefix="/api/pipeline", tags=["documents"])
 # stack PDF-parse memory spikes past the box's RAM.
 _upload_gate = threading.Semaphore(get_settings().max_concurrent_uploads)
 
-# Per-workspace daily RFP-upload rate limit (calendar day, UTC), counted from the
-# append-only upload_events log so deleting an RFP doesn't refund quota.
-DAILY_RFP_CAP = 3
+# Per-workspace weekly RFP-upload rate limit (rolling 7-day window), counted
+# from the append-only upload_events log so deleting an RFP doesn't refund quota.
+WEEKLY_RFP_CAP = 3
 
 
 @router.get("/whoami")
@@ -38,19 +39,19 @@ async def whoami(ctx: GuestContext = Depends(require_guest)) -> dict:
 
 @router.get("/limits")
 async def upload_limits(ctx: GuestContext = Depends(require_guest)) -> dict:
-    """Today's per-workspace upload usage, so the UI can show remaining quota
-    (3 knowledge + 3 RFP per calendar day, UTC)."""
+    """The last 7 days' per-workspace upload usage, so the UI can show remaining
+    quota (3 knowledge + 3 RFP per rolling 7-day window)."""
     with db.user_tx(ctx.user_id) as cur:
         cur.execute(
             "SELECT kind, count(*) AS n FROM upload_events WHERE org_id = %s "
-            "AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date "
+            "AND created_at >= now() - interval '7 days' "
             "GROUP BY kind",
             (ctx.org_id,),
         )
         used = {r["kind"]: r["n"] for r in cur.fetchall()}
     return {
-        "knowledge": {"used": used.get("knowledge", 0), "cap": DAILY_RFP_CAP},
-        "rfp": {"used": used.get("rfp", 0), "cap": DAILY_RFP_CAP},
+        "knowledge": {"used": used.get("knowledge", 0), "cap": WEEKLY_UPLOAD_CAP},
+        "rfp": {"used": used.get("rfp", 0), "cap": WEEKLY_RFP_CAP},
     }
 
 
@@ -103,13 +104,13 @@ async def documents_upload(
 
         cur.execute(
             "SELECT count(*) AS n FROM upload_events WHERE org_id = %s AND kind = 'rfp' "
-            "AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date",
+            "AND created_at >= now() - interval '7 days'",
             (ctx.org_id,),
         )
-        if cur.fetchone()["n"] >= DAILY_RFP_CAP:
+        if cur.fetchone()["n"] >= WEEKLY_RFP_CAP:
             return JSONResponse(
                 status_code=429,
-                content={"error": f"Daily limit reached: {DAILY_RFP_CAP} RFP uploads per day. Try again tomorrow."},
+                content={"error": f"Weekly limit reached: {WEEKLY_RFP_CAP} RFP uploads per week. Try again in a few days."},
             )
 
         storage.save(object_path, data)

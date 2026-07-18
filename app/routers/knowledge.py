@@ -23,9 +23,9 @@ router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 # Free-tier caps, mirroring the TS route.
 MAX_DOCS = 10
 MAX_TOTAL_PAGES = 200
-# Per-workspace daily rate limit (calendar day, UTC), counted from the
+# Per-workspace weekly rate limit (rolling 7-day window), counted from the
 # append-only upload_events log so deletes don't refund quota.
-DAILY_UPLOAD_CAP = 3
+WEEKLY_UPLOAD_CAP = 3
 _DOC_TYPES = {"past_proposal", "security_doc", "policy", "other"}
 
 
@@ -77,14 +77,14 @@ async def upload_knowledge(
         stats = cur.fetchone()
         cur.execute(
             "SELECT count(*) AS n FROM upload_events WHERE org_id = %s AND kind = 'knowledge' "
-            "AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date",
+            "AND created_at >= now() - interval '7 days'",
             (ctx.org_id,),
         )
-        today = cur.fetchone()["n"]
-    if today >= DAILY_UPLOAD_CAP:
+        this_week = cur.fetchone()["n"]
+    if this_week >= WEEKLY_UPLOAD_CAP:
         return JSONResponse(
             status_code=429,
-            content={"error": f"Daily limit reached: {DAILY_UPLOAD_CAP} knowledge uploads per day. Try again tomorrow."},
+            content={"error": f"Weekly limit reached: {WEEKLY_UPLOAD_CAP} knowledge uploads per week. Try again in a few days."},
         )
     if stats["n"] >= MAX_DOCS:
         return JSONResponse(

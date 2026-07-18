@@ -225,9 +225,9 @@ def test_document_status_and_delete_frees_cap(client, guest):
     assert again.status_code == 200, again.text
 
 
-def test_rfp_daily_upload_cap_counts_events_not_rows(client, guest):
-    """3 RFP uploads per workspace per day. Deleting between uploads frees the
-    one-per-deal cap but must NOT refund the daily quota (it counts events)."""
+def test_rfp_weekly_upload_cap_counts_events_not_rows(client, guest):
+    """3 RFP uploads per workspace per week. Deleting between uploads frees the
+    one-per-deal cap but must NOT refund the weekly quota (it counts events)."""
     g = guest()
     for _ in range(3):
         up = client.post(
@@ -239,7 +239,7 @@ def test_rfp_daily_upload_cap_counts_events_not_rows(client, guest):
         assert up.status_code == 200, up.text
         doc_id = up.json()["document"]["id"]
         client.delete(f"/api/pipeline/documents/{doc_id}", headers=_auth(g["access_token"]))
-    # The 4th upload of the day is refused even though no RFP row currently exists.
+    # The 4th upload of the week is refused even though no RFP row currently exists.
     up4 = client.post(
         "/api/pipeline/documents/upload",
         headers=_auth(g["access_token"]),
@@ -247,7 +247,7 @@ def test_rfp_daily_upload_cap_counts_events_not_rows(client, guest):
         files={"file": SAMPLE},
     )
     assert up4.status_code == 429
-    assert "Daily limit" in up4.json()["error"]
+    assert "Weekly limit" in up4.json()["error"]
 
 
 def test_document_status_unknown_is_404(client, guest):

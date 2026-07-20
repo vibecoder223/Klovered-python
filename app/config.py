@@ -43,6 +43,15 @@ class Settings(BaseSettings):
 
     cron_secret: str = ""
 
+    # Email (Resend). Reused from the marketing contact form's setup — the api
+    # container gets these from the SAME .env. Feedback notifications are sent
+    # to feedback_to_email. NOTE: until klovered.com is a verified domain in
+    # Resend, the shared onboarding@resend.dev sender can only deliver to the
+    # Resend account owner's address; point feedback_to_email there until then.
+    resend_api_key: str = ""
+    resend_from: str = "Klovered <onboarding@resend.dev>"
+    feedback_to_email: str = "info@klovered.com"
+
     # Session cookie — shared by the marketing site (/login, /signup) and the
     # tool (/app) because both are served from the SAME domain (see Caddyfile
     # path routing). This is what makes "log in on marketing, land in the tool

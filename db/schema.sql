@@ -248,6 +248,25 @@ create table if not exists upload_events (
 );
 create index if not exists idx_upload_events_org_kind_day on upload_events (org_id, kind, created_at);
 
+-- Product feedback left from the tool after answers are drafted. One row per
+-- user (the unique constraint makes re-submits an upsert, not a duplicate), so
+-- "leave feedback once" holds even if a signed-in user returns on another
+-- device. rating is 1..5; comment/email are optional. deal_id records which
+-- run it was about (nullable — a deal delete shouldn't erase the sentiment).
+create table if not exists feedback (
+  id         uuid primary key default gen_random_uuid(),
+  org_id     uuid not null references organizations(id) on delete cascade,
+  user_id    uuid not null references users(id) on delete cascade,
+  deal_id    uuid references deals(id) on delete set null,
+  rating     smallint not null check (rating between 1 and 5),
+  comment    text not null default '',
+  email      text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id)
+);
+create index if not exists idx_feedback_created on feedback (created_at);
+
 -- claim_jobs: atomically lease up to p_limit pending, due jobs.
 create or replace function claim_jobs(p_limit int) returns setof jobs
   language plpgsql security definer set search_path = public as
@@ -335,6 +354,7 @@ alter table jobs                    enable row level security;
 -- invites: RLS on, NO policy — only the admin (BYPASSRLS) connection touches it.
 alter table invites                 enable row level security;
 alter table upload_events           enable row level security;
+alter table feedback                enable row level security;
 
 -- users holds password_hash, and app_user has table-level SELECT on everything
 -- in this schema — so without RLS any signed-in caller could read every
@@ -412,6 +432,11 @@ create policy jobs_ro on jobs for select
 
 drop policy if exists upload_events_rw on upload_events;
 create policy upload_events_rw on upload_events for all
+  using (org_id in (select current_user_org_ids()))
+  with check (org_id in (select current_user_org_ids()));
+
+drop policy if exists feedback_rw on feedback;
+create policy feedback_rw on feedback for all
   using (org_id in (select current_user_org_ids()))
   with check (org_id in (select current_user_org_ids()));
 

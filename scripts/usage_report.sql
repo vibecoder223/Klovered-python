@@ -62,6 +62,17 @@ select
      join questions q on q.document_id = doc.id
      join responses r on r.question_id = q.id) as orgs_with_answers;
 
+-- 8) Feedback left from the "how did we do?" card: average rating, count, and
+--    the most recent comments (blank comments excluded).
+select round(avg(rating), 2) as avg_rating, count(*) as responses
+from feedback;
+
+select created_at, rating, comment, nullif(email, '') as email
+from feedback
+where comment <> ''
+order by created_at desc
+limit 25;
+
 -- Note: nothing currently logs when someone clicks "Download as Word" — the
 -- export happens entirely client-side (Blob download, no server round-trip),
 -- so it leaves no row here. If export volume matters, that needs a small
